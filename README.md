@@ -1,3 +1,18 @@
+## USAGE
+```
+sudo ./ecapd -c 80k16t -v 0
+```
+Then
+```
+sudo ./eaudit -I 80k16t
+# generates read_files.txt
+```
+
+
+
+
+---
+
 
 <!-- TABLE OF CONTENTS -->
 <details>

@@ -33,6 +33,8 @@
 #include <linux/netlink.h>
 #include <netdb.h>
 #include <signal.h>
+#include <unordered_map>
+#include <unordered_set>
 /*Changed this for reference*/
 #include "Histogram.h"
 
@@ -80,6 +82,11 @@ uint64_t n_out_of_order, t_out_of_order;
 
 bool print_log, useseqnum, useprocid;
 unsigned sn, procid;
+
+// File descriptor to filename mapping for tracking reads
+static unordered_map<long, string> fd_to_filename;
+static unordered_set<string> read_files;
+static FILE *read_files_fp = nullptr;
 
 /**********************************************************************************
  * Some printing and helper functions
@@ -1149,6 +1156,11 @@ exit_open(const char*& p, const char* q) {
    if (print_log) 
       prt_open(at, fn, fl, md, ret);
 
+   // Track successful file opens (ret >= 0 means success, ret is the file descriptor)
+   if (ret >= 0) {
+      fd_to_filename[ret] = string(fn);
+   }
+
    if (*p != '\n')
       errmsg("Missing newline", p, q);
    p++; // Skip the trailing newline character at the end of the record
@@ -1189,6 +1201,10 @@ enter_close(const char*& p, const char* q) {
    if (print_log) {
       prt_close(fd, unrep_read, unrep_write);
    }
+   
+   // Clean up file descriptor mapping when file is closed
+   fd_to_filename.erase(fd);
+   
    if (*p != '\n')
       errmsg("Missing newline", p, q);
    p++; // Skip the trailing newline character at the end of the record
@@ -1205,6 +1221,15 @@ exit_dup(char sc, const char*& p, const char* q) {
 
    if (print_log)
       prt_dup(sc, fd, ret);
+
+   // Handle successful dup/dup2: copy file descriptor mapping to new fd
+   if (ret >= 0) {
+      auto it = fd_to_filename.find(fd);
+      if (it != fd_to_filename.end()) {
+         fd_to_filename[ret] = it->second;
+      }
+   }
+
    if (*p != '\n')
       errmsg("Missing newline", p, q);
    p++; // Skip the trailing newline character at the end of the record
@@ -1237,6 +1262,26 @@ exit_read(const char*& p, const char* q) {
 
    if (print_log) 
       prt_read(fd, ret);
+
+   // Track successful reads and output filenames to read_files.txt
+   if (ret > 0) { // Successfully read some bytes
+      auto it = fd_to_filename.find(fd);
+      if (it != fd_to_filename.end()) {
+         const string& filename = it->second;
+         // Only add to set if not already seen (avoid duplicates)
+         if (read_files.find(filename) == read_files.end()) {
+            read_files.insert(filename);
+            if (read_files_fp) {
+               if (read_files.size() > 1) {
+                  fprintf(read_files_fp, ",%s", filename.c_str());
+               } else {
+                  fprintf(read_files_fp, "%s", filename.c_str());
+               }
+               fflush(read_files_fp);
+            }
+         }
+      }
+   }
 
    if (*p != '\n')
       errmsg("Missing newline", p, q);
@@ -2335,6 +2380,12 @@ parser_init(const char* infn, const char* prtfn, const char* recfn,
    }
    else ofp = nullptr;
 
+   // Initialize read_files.txt for tracking read file names
+   read_files_fp = fopen("read_files.txt", "w");
+   if (!read_files_fp) {
+      fprintf(stderr, "Warning: Unable to open read_files.txt for writing\n");
+   }
+
    /* Ignore SIG_INT if not reading from TTY. Also ignore SIGPIPE. It is better
       to wait for the input stream to be closed or a read to return error. */
    if (!isatty(infd))
@@ -2350,6 +2401,13 @@ parser_finish() {
    if (ofp) {
       fputc('\n', ofp);
       fflush(ofp);
+   }
+
+   // Close read_files.txt and add newline
+   if (read_files_fp) {
+      fprintf(read_files_fp, "\n");
+      fclose(read_files_fp);
+      read_files_fp = nullptr;
    }
 
    fprintf(stderr, "****************************** Summary from Parser "
